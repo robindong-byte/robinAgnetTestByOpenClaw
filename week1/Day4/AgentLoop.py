@@ -5,7 +5,7 @@ import json
 from openai import OpenAI
 from dotenv import load_dotenv
 
-env_path="../.env"
+env_path="../../.env"
 load_dotenv(env_path)
 
 client = OpenAI(
